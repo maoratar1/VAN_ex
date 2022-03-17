@@ -1,12 +1,13 @@
 import random
 import cv2
 import matplotlib.pyplot as plt
+import math
 
 # == Constants == #
 DATA_PATH = r'/Users/maoratar/opt/anaconda3/envs/Van_Ex1/VAN_ex/dataset/sequences/00/'
 IDX = 000000
 MATCHES_NUM = 20
-RATIO = 0.7
+RATIO = 0.35
 MATCHES_NORM = cv2.NORM_L2
 PASSED = "PASSED"
 FAILED = "FAILED"
@@ -94,7 +95,7 @@ def draw_matches(img1, img1_kpts, img2, img2_kpts, matches):
     plt.show()
 
 
-def significance_test(img1_dsc, img2_dsc, ratio, rand):
+def significance_test(img1_dsc, img2_dsc, ratio):
     """
     Applying the significance test - rejects all matches that their distance ratio between the 1st and 2nd
     nearest neighbors is lower than predetermined RATIO.
@@ -107,10 +108,6 @@ def significance_test(img1_dsc, img2_dsc, ratio, rand):
     """
     bf = cv2.BFMatcher()
     matches = bf.knnMatch(img1_dsc, img2_dsc, k=2)
-    if rand:
-        matches = random.choices(matches, k=MATCHES_NUM)
-    else:
-        matches = matches[:MATCHES_NUM]
 
     # Apply ratio test
     pass_test = []
@@ -129,23 +126,52 @@ def draw_matches_of_sig_test(img1, img1_kpts, img2, img2_kpts, test_pts, matches
     Plots the matches that pass/failed the significance test
     :param test_pts: points that failed / passed the significance test
     """
+    rand_test_pts = random.choices(test_pts, k=MATCHES_NUM)
+    img3 = cv2.drawMatchesKnn(img1, img1_kpts, img2, img2_kpts, rand_test_pts, None, flags=2)
 
-    # cv2.drawMatchesKnn expects list of lists as matches.
-    img3 = cv2.drawMatchesKnn(img1, img1_kpts, img2, img2_kpts, test_pts, None, flags=2)
-
-    plt.title(f'Points that {test_desc} the significance test (Ratio: {RATIO}).'
-              f'\nNum matches:{len(test_pts)}/{matches_num}')
+    plt.title(f'Plot of {MATCHES_NUM} points that {test_desc} the significance test (Ratio: {RATIO}).'
+              f'\nTotal points number that {test_desc} : {len(test_pts)}/{matches_num}')
     plt.imshow(img3)
     plt.show()
 
 
 def print_num_matches_diff_ratio(img1_dsc, img2_dsc):
+    """
+    Prints the number of points that passed/failed the test as a function of the ratio value
+    :param img1_dsc:
+    :param img2_dsc:
+    :return:
+    """
     ratios = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     print("Matches amount that passed/failed the significance test with the ratio:")
     print(f"Ratio\tpassed\tfailed")
     for ratio in ratios:
-        pass_test, fail_test = significance_test(img1_dsc, img2_dsc, ratio, rand=True)
+        pass_test, fail_test = significance_test(img1_dsc, img2_dsc, ratio)
         print(f"{ratio}\t\t{len(pass_test)}\t\t{len(fail_test)}")
+
+
+def plot_pts_that_failed_sig_test(img1, img1_kpts, img2, img2_kpts, fail_test):
+    """
+    Plots a correct point that failed the significance test
+    :param fail_test: points that failed the significance test
+    """
+    error = 0.5
+    for match in fail_test:
+        img1_idx = match[0].queryIdx
+        img2_idx = match[0].trainIdx
+        x1, y1 = img1_kpts[img1_idx].pt
+        x2, y2 = img2_kpts[img2_idx].pt
+
+        if abs(y2 - y1) <= error and abs(x2 - x1) <= error:
+            img3 = cv2.drawMatchesKnn(img1, img1_kpts, img2, img2_kpts, [match], None, flags=2)
+
+            plt.title(f'Correct Point that Failed the significance test with Ratio: {RATIO}')
+            plt.imshow(img3)
+            plt.show()
+
+
+
+
 
 
 if __name__ == '__main__':
@@ -155,7 +181,7 @@ if __name__ == '__main__':
     # Detects the image key points and compute their descriptors
     alg = cv2.AKAZE_create()
     img1_kpts, img1_dsc, img2_kpts, img2_dsc = feature_detection_and_description(img1, img2, alg)
-    draw_keypts(img1, img1_kpts, img2, img2_kpts)
+    # draw_keypts(img1, img1_kpts, img2, img2_kpts)
 
     # Matches between the images and plots the matching
     matches = matching(MATCHES_NORM, img1_dsc, img2_dsc)
@@ -163,9 +189,11 @@ if __name__ == '__main__':
     draw_matches(img1, img1_kpts, img2, img2_kpts, rand_matches)
 
     # Apply the significance test
-    pass_test, fail_test = significance_test(img1_dsc, img2_dsc, RATIO, rand=True)
+    pass_test, fail_test = significance_test(img1_dsc, img2_dsc, RATIO)
+    num_matches = len(pass_test) + len(fail_test)
     # Plots the pts that passed the test
-    draw_matches_of_sig_test(img1, img1_kpts, img2, img2_kpts, pass_test, MATCHES_NUM, PASSED)
+    draw_matches_of_sig_test(img1, img1_kpts, img2, img2_kpts, pass_test, num_matches, PASSED)
     # Plots the pts that failed the test
-    draw_matches_of_sig_test(img1, img1_kpts, img2, img2_kpts, fail_test, MATCHES_NUM, FAILED)
+    draw_matches_of_sig_test(img1, img1_kpts, img2, img2_kpts, fail_test, num_matches, FAILED)
+    
 
