@@ -148,8 +148,9 @@ def check_projection(img_projected_pts, img_pts_coor, acc=SUPP_ERR):
     :return:boolean vector
     """
     img_pts_diff = img_projected_pts - img_pts_coor  # (x1, y1), (x2, y2) -> (x1 - x2, y1 - y2)
-    left0_dist = np.sqrt(np.einsum("ij,ij->i", img_pts_diff, img_pts_diff))  # sqrt( (x1 - x2)^2 + (y1 - y2)^2 )
-    return left0_dist <= acc
+    left0_dist = np.einsum("ij,ij->i", img_pts_diff, img_pts_diff)  # (x1 - x2)^2 + (y1 - y2)^2p
+    s_acc = acc ** 2
+    return left0_dist <= s_acc
 
 
 def create_rec_dic(pair_matches, pair_rec_matches_idx):
