@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
+import Feature
 
 DATA_PATH = r'/Users/maoratar/opt/anaconda3/envs/Van_Ex1/VAN_ex/dataset/sequences/00/'
 IDX = 000000
@@ -11,12 +12,20 @@ MATCHES_NORM = cv2.NORM_L2
 PASSED = "PASSED"
 FAILED = "FAILED"
 ALG = cv2.SIFT_create()
+LEFT_CAM_TRANS_PATH = r'/Users/maoratar/opt/anaconda3/envs/Van_Ex1/VAN_ex/dataset/poses/00.txt'
+INLIER_COLOR = "orange"
+OUTLIER_COLOR = "cyan"
+IMAGE_HEIGHT = 376
+IMAGE_WIDTH = 1241
+PNP_NUM_PTS = 4
+SUPP_ERR = 2
+MOVIE_LEN = 3450
 
 
 # == Ex1 == #
 def read_images(idx):
     """
-    :param idx: Images's index in the Kitti dataset
+    :param idx: Image's index in the Kitti dataset
     :return: left and right cameras photos
     """
     img_name = '{:06d}.png'.format(idx)
@@ -109,6 +118,8 @@ def read_cameras():
         m2 = np.linalg.inv(k) @ m2
         return k, m1, m2
 
+K, M1, M2 = read_cameras()
+
 
 def draw_matches(img1, img1_kpts, img2, img2_kpts, matches):
     """
@@ -190,6 +201,21 @@ def get_matches_coor(matches, img1_kpts, img2_kpts):
     return np.array(img1_matches_coor), np.array(img2_matches_coor)
 
 
+def get_matches_coor_and_kpts(matches, img1_kpts, img2_kpts):
+    """
+    Returns 2 numpy arrays with dimension of 2XN of matches coordinates and their coorsponding
+    keypoint index in img1 and img2 accordingly
+    """
+    img1_matches_coor, img2_matches_coor = [], []
+    for match in matches:
+        img1_kpt_idx, img2_kpt_idx = match.queryIdx, match.trainIdx
+        img1_x, img1_y = img1_kpts[img1_kpt_idx].pt[0], img1_kpts[img1_kpt_idx].pt[1]
+        img2_x, img2_y = img2_kpts[img2_kpt_idx].pt[0], img2_kpts[img2_kpt_idx].pt[1]
+        img1_matches_coor.append([img1_kpt_idx, img1_x, img1_y, img2_x, img2_y])
+
+    return np.array(img1_matches_coor)
+
+
 def get_inliers_and_outliers_coor_for_rec(inliers_matches, outliers_matches, img1_kpts, img2_kpts):
     img1_inliers, img2_inliers = get_matches_coor(inliers_matches, img1_kpts, img2_kpts)
     img1_outliers, img2_outliers = get_matches_coor(outliers_matches, img1_kpts, img2_kpts)
@@ -263,4 +289,397 @@ def draw_triangulations(p3d_pts, cv_p3d_pts):
     fig.savefig(f"VAN_ex/triangulations plot.png")
     plt.close(fig)
 
+
 # == Ex3 ==
+def compute_trans_between_cur_to_next(left0_kpts, left0_dsc, right0_kpts,
+                                      pair0_matches, pair0_rec_matches_idx,
+                                      left1_kpts, left1_dsc, right1_kpts,
+                                      pair1_matches, pair1_rec_matches_idx):
+    """
+   Compute the transformation T between left 0 and left1 images
+   :return: numpy array with shape 3 X 4
+   """
+
+    # Find matches between left0 and left1
+    left0_left1_matches = matching(left0_dsc, left1_dsc)
+
+    # Find key pts that match in all 4 images
+    rec0_dic = create_rec_dic(pair0_matches, pair0_rec_matches_idx)  # dict of {left kpt idx: pair rec id}
+    rec1_dic = create_rec_dic(pair1_matches, pair1_rec_matches_idx)
+    q_pair0_idx, q_pair1_idx, q_left0_left1_idx = find_kpts_in_all_4_rec(left0_left1_matches, rec0_dic, rec1_dic)
+
+    # Pair0 triangulation
+    left0_matches_coor, right0_matches_coor = get_matches_coor(pair0_matches[q_pair0_idx], left0_kpts,
+                                                                      right0_kpts)
+    pair0_p3d_pts = triangulate(K @ M1, K @ M2, left0_matches_coor, right0_matches_coor)
+
+    # Compute left1 and right 1 matches coordinates in the image
+    left1_matches_coor, right1_matches_coor = get_matches_coor(pair1_matches[q_pair1_idx], left1_kpts,
+                                                                      right1_kpts)
+
+    # Find the best transformation between left0 and left1 with ransac
+    best_left1_cam_mat, max_supp_group_idx = online_est_pnp_ransac(PNP_NUM_PTS, pair0_p3d_pts,
+                                                                   M1, left0_matches_coor,
+                                                                   M2, right0_matches_coor,
+                                                                   left1_matches_coor,
+                                                                   M2, right1_matches_coor,
+                                                                   K, acc=SUPP_ERR)
+
+    return best_left1_cam_mat, max_supp_group_idx
+
+
+def read_and_rec_match(idx):
+    """
+    Reads images from pair idx, Finds matches with rectified test
+    :param idx: Frame's index
+    :return: key points of the two images and the matches
+    """
+    # Find matches in pair0 with rectified test
+    left0, right0 = read_images(idx)
+    kernel_size = 10
+    left0 = cv2.blur(left0, (kernel_size, kernel_size))
+    right0 = cv2.blur(right0, (kernel_size, kernel_size))
+    left0_kpts, left0_dsc, right0_kpts, _, pair0_matches = detect_and_match(left0, right0)
+    pair0_rec_matches_idx, _ = rectified_stereo_pattern_rej(left0_kpts, right0_kpts, pair0_matches)
+    return left0_kpts, left0_dsc, right0_kpts, pair0_matches, pair0_rec_matches_idx
+
+
+def whole_movie(first_left_ex_mat=M1):
+    """
+    Compute the transformation of two consequence left images in the whole movie
+    :return:array of transformations where the i'th element is the transformation between i-1 -> i
+    """
+    T_arr = [first_left_ex_mat]
+
+    # Find matches in pair0 with rectified test
+    left0_kpts, left0_dsc, right0_kpts, pair0_matches, pair0_rec_matches_idx = read_and_rec_match(IDX)
+    print("Pair 0")
+    for i in range(1, MOVIE_LEN - 1, 3):
+        if i % 100 == 0:
+            print("Pair ", i)
+        left1_kpts, left1_dsc, right1_kpts, pair1_matches, pair1_rec_matches_idx = read_and_rec_match(IDX + i)
+
+        left1_ex_mat = compute_trans_between_cur_to_next(left0_kpts, left0_dsc, right0_kpts,
+                                                         pair0_matches, pair0_rec_matches_idx,
+                                                         left1_kpts, left1_dsc, right1_kpts,
+                                                         pair1_matches, pair1_rec_matches_idx)
+        left0_kpts, left0_dsc, right0_kpts, pair0_matches, pair0_rec_matches_idx = left1_kpts, left1_dsc,\
+                                                                                   right1_kpts, pair1_matches,\
+                                                                                   pair1_rec_matches_idx
+        T_arr.append(left1_ex_mat)
+
+    return T_arr
+
+
+def create_rec_dic(pair_matches, pair_rec_matches_idx):
+    """
+    Create dictionary in the form that for each key point of the left image:
+                    {index in the list of key points: index in the matches list}
+    :param pair_matches: matches between left(query) and right(train) images
+    :param pair_rec_matches_idx: list of matches indexes (from pair matches list) that passed the rectified test
+    :return: Dictionary
+    """
+    rec1_dic = {}
+    for idx in pair_rec_matches_idx:
+        kpt_id = pair_matches[idx].queryIdx
+        rec1_dic[kpt_id] = idx
+    return rec1_dic
+
+
+def find_kpts_in_all_4_rec(left0_left1_matches, rec0_dic, rec1_dic):
+    """
+    Finds matching key points in left0 and left1 that passed the rectified test.
+    :param left0_left1_matches: matches between left0 and left1 images
+    :param rec0_dic: Dictionary which contains the key points indexes that passed the rectified test in pair0
+    :param rec1_dic: same as above for pair1
+    :return: 3 lists:
+                    1) q_pair0: list of indexes from pair0 matches list that passed the rectified test in pair 0
+                                and are matched in left0 and left1
+                    2) q_pair1: same as above for pair1
+                    3) q_left0_left1: same as above for left0_left1 matches list
+    """
+    q_pair0, q_pair1, q_left0_left1 = [], [], []
+
+    for i, match in enumerate(left0_left1_matches):
+        left0_kpt_idx = match.queryIdx
+        left1_kpt_idx = match.trainIdx
+
+        # Explanation:
+        # Check if those key points passed the rectified test in each pair
+        # if so it adds to q_pair0 it's index in the list of pair 0 matches
+        # so in index i, q_pair0[i] contains the index of the match in
+        # pair 0 matches that match to pair 1 matches by the connector from
+        # the matches between left0 and left1
+        # for example if i'th match is <left0_kpt, left1_kpt> and left0_kpt and left1_kpt passed the rectified test
+        # we get that pair0idx[i] = <left0_kpt, right0_kpt> (actually the pair0 index of this pair)
+        #             pair1idx[i] = <left1_kpt, right1_kpt> (same as above)
+        #             q_left0_left1[i] = <left0_kpt, left1_kpt> (same as above)
+        if left0_kpt_idx in rec0_dic and left1_kpt_idx in rec1_dic:
+            q_pair0.append(rec0_dic[left0_kpt_idx])
+            q_pair1.append(rec1_dic[left1_kpt_idx])
+            q_left0_left1.append(i)
+
+    return q_pair0, q_pair1, q_left0_left1
+
+
+def online_est_pnp_ransac(model_parm_num, world_p3d_pts,
+                          left0_ex_mat, left0_matches_coor,
+                          right0_ex_mat, right0_matches_coor,
+                          left1_matches_coor,
+                          right1_to_left1_ex_mat, right1_matches_coor,
+                          calib_mat=K, acc=SUPP_ERR):  # Todo: check what to do with projecion on pair 0
+    """
+    Apply Ransac method to estimate the transformation using pnp with online computation of the iteration number
+    :return: Extrinsic left1 camera matrix
+    """
+    # Basic variables
+    max_supp, max_supp_group_idx = -1, None
+    inliers_num, outliers_num = 0, 0
+    first_loop_iter = 0
+    first_loop_iter_est = lambda prob, outliers_perc: np.log(1 - prob) / np.log(
+        1 - np.power(1 - outliers_perc, model_parm_num))
+    outliers_perc, prob = 0.99, 0.99
+
+    # Compute pair0 camera's projection matrices
+    # left0_proj_mat = calib_mat @ left0_ex_mat
+    # right0_proj_mat = calib_mat @ right0_ex_mat
+
+    # Ransac loop
+    while outliers_perc != 0 and first_loop_iter < first_loop_iter_est(prob, outliers_perc):
+
+        # Get randomize points with amount of "model_param_num" and estimate the model by them
+        pts_idx = np.random.randint(0, len(left1_matches_coor), model_parm_num)
+        left1_ex_mat = pnp(world_p3d_pts[pts_idx], left1_matches_coor[pts_idx], calib_mat, cv2.SOLVEPNP_AP3P)
+        # Sanity check
+        if left1_ex_mat is None:
+            continue
+
+        # Compute left1 and right1 projection matrices
+        right1_to_left0_ex_mat = compose_transformations(left1_ex_mat, right1_to_left1_ex_mat)
+        left1_proj_mat = calib_mat @ left1_ex_mat
+        right1_proj_mat = calib_mat @ right1_to_left0_ex_mat
+
+        # Find model's supporters
+        supporters_idx = find_supporters_4_frame(world_p3d_pts,
+                                                 left1_proj_mat, left1_matches_coor,
+                                                 right1_proj_mat, right1_matches_coor,
+                                                 acc=acc)
+
+        # Check which model is the best
+        num_supp = len(supporters_idx)
+        if num_supp > max_supp:
+            max_supp = num_supp
+            max_supp_group_idx = supporters_idx
+
+        first_loop_iter += 1
+
+        # Estimate outliers percentage
+        outliers_num += len(left1_matches_coor) - num_supp
+        inliers_num += num_supp
+        outliers_perc = min(outliers_num / (inliers_num + outliers_num), 0.99)
+
+    # Refine the model by estimating the model by all points
+    best_T = extra_refine(max_supp_group_idx, world_p3d_pts, left1_matches_coor, right1_to_left1_ex_mat,
+                          right1_matches_coor, calib_mat, acc, it_num=1)
+
+    return best_T, max_supp_group_idx
+
+
+def extra_refine(supp_idx, world_p3d_pts,
+                 left1_matches_coor,
+                 right1_to_left1_ex_mat, right1_matches_coor,
+                 calib_mat=K, acc=SUPP_ERR, it_num=1):
+    """
+    Apply the model refining several times. Estimate model from inliers and inliers from model
+    """
+
+    left1_ex_mat = None
+    for i in range(it_num):
+        left1_ex_mat = pnp(world_p3d_pts[supp_idx], left1_matches_coor[supp_idx], calib_mat, flag=cv2.SOLVEPNP_ITERATIVE)
+        # Sanity check
+        if left1_ex_mat is None:
+            continue
+
+        # Compute left1 and right1 projection matrices
+        right1_to_left0_ex_mat = compose_transformations(left1_ex_mat, right1_to_left1_ex_mat)
+        left1_proj_mat = calib_mat @ left1_ex_mat
+        right1_proj_mat = calib_mat @ right1_to_left0_ex_mat
+
+        # Find model's supporters
+        supp_idx = find_supporters_4_frame(world_p3d_pts,
+                                           left1_proj_mat, left1_matches_coor,
+                                           right1_proj_mat, right1_matches_coor,
+                                           acc=acc)
+
+    return left1_ex_mat
+
+
+def rodriguez_to_mat(R_vec, t_vec):
+    """
+    Compute rotation matrix from rotation vector and returns it as
+    numpy array [R|t] with shape 3 X 4
+    :param R_vec: Rotation vector
+    :param t_vec: Translation vector
+    """
+    R_mat, _ = cv2.Rodrigues(R_vec)
+    return np.hstack((R_mat, t_vec))
+
+
+def pnp(world_p3d_pts, img_proj_coor, calib_mat, flag):
+    """
+    Apply the pnp algorithm
+    :param calib_mat: Image's calibration matrix
+    :param flag: cv2 SOLVEPNP method
+    :return: If pnp succeed returns Camera's Extrinsic [R|t] matrix else None
+    """
+    success, R_vec, t_vec = cv2.solvePnP(world_p3d_pts, img_proj_coor, calib_mat, None, flags=flag)
+    ex_cam_mat = None
+    if success:
+        ex_cam_mat = rodriguez_to_mat(R_vec, t_vec)
+    return ex_cam_mat
+
+
+def relative_camera_pos(ex_cam_mat):
+    """
+    Finds and returns the Camera position at the "world" coordinates
+    :param ex_cam_mat: [Rotation mat|translation vec]
+    """
+    # R = extrinsic_camera_mat[:, :3]
+    # t = extrinsic_camera_mat[:, 3]
+    return -1 * ex_cam_mat[:, :3].T @ ex_cam_mat[:, 3]
+
+
+def relative_camera_pos_4(left0_ex_mat, right0_ex_mat, left1_ex_mat, right1_ex_mat):
+    """
+    Finds and returns the Camera position at the "world" coordinates of two stereo images
+    '0' index is for the first pair and '1' for the second pair
+    """
+    left0_pos = relative_camera_pos(left0_ex_mat)
+    right0_pos = relative_camera_pos(right0_ex_mat)
+    left1_pos = relative_camera_pos(left1_ex_mat)
+    right1_pos = relative_camera_pos(right1_ex_mat)
+    return left0_pos, right0_pos, left1_pos, right1_pos
+
+
+def compose_transformations(first_ex_mat, second_ex_mat):
+    """
+    Compute the composition of two extrinsic camera matrices.
+    first_cam : A -> B
+    second_cam : B -> C
+    composed mat : A -> C
+    """
+    # [R2 | t2] @ [ R1 | t1] = [R2 @ R1 | R2 @ t1 + t2]
+    #             [000 | 1 ]
+    hom1 = np.append(first_ex_mat, [np.array([0, 0, 0, 1])], axis=0)
+    return second_ex_mat @ hom1
+
+
+def find_supporters_4_frame(pair0_p3d_pts,
+                            left1_proj_mat, left1_matches_coor,
+                            right1_proj_mat, right1_matches_coor,
+                            acc=SUPP_ERR):
+    """
+    Finds the supporter in all 4 images
+    :param pair0_p3d_pts: 3d points from pair 0 triangulation
+    :param left0_proj_mat: Left0 projection camera matrix: K[R|t]
+    :param left0_matches_coor: Corresponds pixel location in the image plane to the 3d points
+    :param acc: Accuracy - distance from 3d point projection to correspond left0 pixel
+    :return: Supporters indexes from left1 matches coordinates
+    """
+    # Finds the projection of the 3d points to the images plane
+    left1_proj = project(pair0_p3d_pts, left1_proj_mat)
+    right1_proj = project(pair0_p3d_pts, right1_proj_mat)
+
+    # Finds correct projections
+    left1_supp_indicator = check_projection(left1_proj, left1_matches_coor, acc)
+    right1_supp_indicator = check_projection(right1_proj, right1_matches_coor, acc)
+
+    # Finds the 3d points that satisfies all the conditions
+    all_supp_indicators = left1_supp_indicator & right1_supp_indicator  #Todo: checking now
+    supporters_idx = np.where(all_supp_indicators == 1)[0]
+
+    return supporters_idx
+
+
+def project(p3d_pts, cam_proj_mat):
+    """
+    Project 3d point to the camera's image plane
+    :return: numpy array of projections (num p3d point) X 2
+    """
+    hom_proj = p3d_pts @ cam_proj_mat[:, :3].T + cam_proj_mat[:, 3].T
+    proj = hom_proj[:, :2] / hom_proj[:, [-1]]
+    return proj
+
+
+def check_projection(img_projected_pts, img_pts_coor, acc=SUPP_ERR):
+    """
+    Returns a boolean vector that indicates which row satisfy the distance condition
+    :param acc: Euclidean distance
+    :return:boolean vector
+    """
+    left0_dist = compute_reprojection_square_dist(img_projected_pts, img_pts_coor)
+    q_acc = acc ** 2
+    return left0_dist <= q_acc
+
+
+def compute_reprojection_square_dist(img_projected_pts, img_pts_coor):
+    """
+    Check the euclidean dist between the projected points and correspond pixel locations
+    :param img_projected_pts:
+    :param img_pts_coor:
+    :return:
+    """
+    img_pts_diff = img_projected_pts - img_pts_coor  # (x1, y1), (x2, y2) -> (x1 - x2, y1 - y2)
+    left0_squared_dist = np.einsum("ij,ij->i", img_pts_diff, img_pts_diff)  # (x1 - x2)^2 + (y1 - y2)^2
+    return left0_squared_dist
+
+
+def compute_reprojection_euclidean_dist(img_projected_pts, img_pts_coor):
+    left0_squared_dist = compute_reprojection_square_dist(img_projected_pts, img_pts_coor)
+    return np.sqrt(left0_squared_dist)
+
+
+def get_ground_truth_transformations(left_cam_trans_path=LEFT_CAM_TRANS_PATH, movie_len=MOVIE_LEN):
+    """
+    Reads the ground truth transformations
+    :return: array of transformation
+    """
+    T_ground_truth_arr = []
+    with open(left_cam_trans_path) as f:
+        lines = f.readlines()
+    for i in range(movie_len):
+        left_mat = np.array(lines[i].split(" "))[:-1].astype(float).reshape((3, 4))
+        T_ground_truth_arr.append(left_mat)
+    return T_ground_truth_arr
+
+
+# === Ex4 === #
+def get_feature_obj(matches, img1_kpts, img2_kpts):
+    """
+    Same as "get_matches_coor_and_kpts" except that here we return a list of Feature object
+    """
+    frame_features = []
+    for match in matches:
+        img1_kpt_idx, img2_kpt_idx = match.queryIdx, match.trainIdx
+        img1_x, img1_y = img1_kpts[img1_kpt_idx].pt[0], img1_kpts[img1_kpt_idx].pt[1]
+        img2_x, img2_y = img2_kpts[img2_kpt_idx].pt[0], img2_kpts[img2_kpt_idx].pt[1]
+        feature = Feature.Feature(img1_kpt_idx, img2_kpt_idx, img1_x, img2_x, img1_y)
+        frame_features.append(feature)
+
+    return np.array(frame_features)
+
+
+def get_features_left_coor(frame_features):
+    left_feature_coor = []
+    for feature in frame_features:
+        left_feature_coor.append(feature.get_left_coor())
+
+    return np.array(left_feature_coor)
+
+
+def get_features_right_coor(frame_features):
+    right_feature_coor = []
+    for feature in frame_features:
+        right_feature_coor.append(feature.get_right_coor())
+
+    return np.array(right_feature_coor)
