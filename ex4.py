@@ -1,8 +1,10 @@
-import pickle
+import time
+
+import DataBase as DB
 import random
 
 import numpy as np
-from matplotlib import pyplot as plt, gridspec
+from matplotlib import pyplot as plt
 from matplotlib.patches import ConnectionPatch
 
 import utills
@@ -16,46 +18,43 @@ DB_FRAME_PATH = r'VAN_ex/Frame tracks.csv'
 STAT_TRACK_FRAME_PATH = r'VAN_ex/Track and frames stat.csv'
 
 
-def compute_kpt_and_coor_whole_movie():
+def find_features_in_consecutive_frames_whole_movie():
     """
-    Compute the transformation of two consequence left images in the whole movie
+    Finds Features of two consecutive frames in the whole movie
     :return: Array which each row contains 2 arrays [frame0_features, frame1_features]
-     frame0_features contains Feature objects that match to frame1_features, and they are sharing
-     indexes. Meaning that ith feature at frame0_features are match to ith frame1_features
+     frame0_features contains Feature objects that match to frame1_features and share
+     indexes i.e the ith feature at frame0_features match to the ith feature at frame1_features
     """
 
-    prev_and_next_frame_features = []
+    consecutive_frame_features = []
 
     # Find matches in pair0 with rectified test
     left0_kpts, left0_dsc, right0_kpts, pair0_matches, pair0_rec_matches_idx = \
-                                                                          utills.read_and_rec_match(utills.IDX)
+                                                                          utills.read_and_rec_match(0, kernel_size=10)
     print("Pair 0")
     inliers_percentage = []
-    frame1_features = []
     for i in range(1, utills.MOVIE_LEN):
         if i % 100 == 0:
             print("Pair ", i)
         left1_kpts, left1_dsc, right1_kpts, pair1_matches, pair1_rec_matches_idx = \
-                                                                     utills.read_and_rec_match(utills.IDX + i)
+                                                                     utills.read_and_rec_match(i)
 
-        frame0_features, frame1_features = compute_kpts_and_coor(left0_kpts, left0_dsc, right0_kpts,
+        frame0_features, frame1_features, frame0_inliers_percentage = find_features_in_consecutive_frames(left0_kpts, left0_dsc, right0_kpts,
                                                                        pair0_matches, pair0_rec_matches_idx,
                                                                        left1_kpts, left1_dsc, right1_kpts,
                                                                        pair1_matches, pair1_rec_matches_idx)
 
-        inliers_percentage.append(100 * len(frame0_features) / len(pair0_matches))
-
         left0_kpts, left0_dsc, right0_kpts, pair0_matches, pair0_rec_matches_idx = left1_kpts, left1_dsc, \
                                                                                    right1_kpts, pair1_matches, \
                                                                                    pair1_rec_matches_idx
-        prev_and_next_frame_features.append([frame0_features, frame1_features])
+        consecutive_frame_features.append([frame0_features, frame1_features])
 
-    inliers_percentage.append(100 * len(frame1_features) / len(pair0_matches))
+        inliers_percentage.append(frame0_inliers_percentage)
 
-    return prev_and_next_frame_features, inliers_percentage
+    return consecutive_frame_features, inliers_percentage
 
 
-def compute_kpts_and_coor(left0_kpts, left0_dsc, right0_kpts,
+def find_features_in_consecutive_frames(left0_kpts, left0_dsc, right0_kpts,
                           pair0_matches, pair0_rec_matches_idx,
                           left1_kpts, left1_dsc, right1_kpts,
                           pair1_matches, pair1_rec_matches_idx):
@@ -75,7 +74,7 @@ def compute_kpts_and_coor(left0_kpts, left0_dsc, right0_kpts,
     # Get frame 0 Feature objects (which passed the rec test)
     frame0_features = utills.get_feature_obj(pair0_matches[q_pair0_idx], left0_kpts, right0_kpts)
 
-    # Here we take only their coordinates
+    # Here we take only their d2_points
     left0_matches_coor = utills.get_features_left_coor(frame0_features)
     right0_matches_coor = utills.get_features_right_coor(frame0_features)
 
@@ -88,7 +87,7 @@ def compute_kpts_and_coor(left0_kpts, left0_dsc, right0_kpts,
 
     # Notice that frame0_features and frame1_features are sharing indexes
 
-    # Here we take only their coordinates
+    # Here we take only their d2_points
     left1_matches_coor = utills.get_features_left_coor(frame1_features)
     right1_matches_coor = utills.get_features_right_coor(frame1_features)
 
@@ -101,7 +100,8 @@ def compute_kpts_and_coor(left0_kpts, left0_dsc, right0_kpts,
                                                                           utills.M2, right1_matches_coor,
                                                                           utills.K, acc=utills.SUPP_ERR)
 
-    return frame0_features[max_supp_group_idx], frame1_features[max_supp_group_idx]
+    frame0_inliers_percentage = 100 * len(max_supp_group_idx) / len(frame0_features)
+    return frame0_features[max_supp_group_idx], frame1_features[max_supp_group_idx], frame0_inliers_percentage
 
 
 # === Missions === #
@@ -120,7 +120,7 @@ def mission2(db):
     total_tracks_num = db.get_num_tracks()
     frames_number = db.get_num_frames()
     max_track_len, min_track_len, mean_track_len = compute_track_stat(db.get_tracks())
-    mean_frames_track_len = compute_mean_frames_track(db.get_frames_idxes())
+    mean_frames_track_len = compute_mean_frames_track(db.get_frames())
     data = {'Statistics': [total_tracks_num, frames_number, max_track_len, min_track_len, mean_track_len,
                            mean_frames_track_len]}
 
@@ -224,7 +224,7 @@ def plot_track(track):
         l_coor = feature.get_left_coor()
         r_coor = feature.get_right_coor()
 
-        left_img, right_img = utills.read_images(utills.IDX + frame)
+        left_img, right_img = utills.images.get_image(frame)
         cropped_left_img, l_coor = crop_image(l_coor, left_img, crop_size)
         cropped_right_img, r_coor = crop_image(r_coor, right_img, crop_size)
 
@@ -267,7 +267,7 @@ def plot_track(track):
 
 def crop_image(coor, img, crop_size):
     """
-    Crops image "img" to size of "crop_size" X "crop_size" around the coordinates "coor"
+    Crops image "img" to size of "crop_size" X "crop_size" around the d2_points "coor"
     :return: Cropped image
     """
     r_x = int(min(utills.IMAGE_WIDTH, coor[0] + crop_size))
@@ -295,7 +295,7 @@ def connectivity_graph(db, frames_num):
     """
     outgoing_tracks_num_per_frame = []
     tracks = db.get_tracks()
-    frames = db.get_frames_idxes()
+    frames = db.get_frames()
 
     for i in range(frames_num):
         frame = frames[i]
@@ -324,7 +324,7 @@ def plot_connectivity_graph(vals_per_frame, frames_num):
     f.set_figwidth(14)
     f.set_figheight(7)
 
-    # plotting the points
+    # plotting the d2_points
     plt.plot(x, vals_per_frame)
 
     plt.xlabel('frames')
@@ -368,16 +368,16 @@ def mission6(db):
     for track in db.get_tracks():
         track_lengths.append(track.get_track_len())
 
-    plot_hist(track_lengths)
+    plot_histogram(track_lengths)
 
 
-def plot_hist(track_lengths):
+def plot_histogram(track_lengths):
     """
     Plot the histogram
     """
     fig, ax = plt.subplots(figsize=(10, 7))
-    hist_track_lengths, _, _ = plt.hist(track_lengths)
-    # plt.clf()
+    hist_track_lengths, _, _ = plt.hist(track_lengths, bins=40)
+    plt.clf()
 
     ax.set_title("Track length histogram")
     plt.plot(hist_track_lengths)
@@ -400,7 +400,7 @@ def mission7(db, frame_idx_triangulate, track_len=10):
     :param frame_idx_triangulate: frame's index to triangulate from
     """
     track = get_rand_track(track_len, db.get_tracks())
-    track_frames_ids = track.get_frames_ids()
+    track_frames_ids = track.get_frames_idxes()
 
     ground_truth_trans = utills.get_ground_truth_transformations()[track_frames_ids[0]: track_frames_ids[-1] + 1]
 
@@ -413,7 +413,7 @@ def mission7(db, frame_idx_triangulate, track_len=10):
     last_left_trans = ground_truth_trans[frame_idx_triangulate]
     last_left_proj_mat = utills.K @ last_left_trans
     last_right_proj_mat = utills.K @ utills.compose_transformations(last_left_trans, utills.M2)
-    p34 = utills.triangulate(last_left_proj_mat, last_right_proj_mat, [last_left_img_coor], [last_right_img_coor])
+    p3d = utills.triangulate(last_left_proj_mat, last_right_proj_mat, [last_left_img_coor], [last_right_img_coor])
 
     left_projections = []
     right_projections = []
@@ -422,8 +422,8 @@ def mission7(db, frame_idx_triangulate, track_len=10):
         left_proj_cam = utills.K @ trans
         right_proj_cam = utills.K @ utills.compose_transformations(trans, utills.M2)
 
-        left_proj = utills.project(p34, left_proj_cam)[0]
-        right_proj = utills.project(p34, right_proj_cam)[0]
+        left_proj = utills.project(p3d, left_proj_cam)[0]
+        right_proj = utills.project(p3d, right_proj_cam)[0]
 
         left_projections.append(left_proj)
         right_projections.append(right_proj)
@@ -450,3 +450,99 @@ def plot_reprojection_error_graph(total_proj_dist, frame_idx_triangulate):
 
     fig.savefig(f"VAN_ex/Re projection error graph for {frame_title} frame.png")
     plt.close(fig)
+
+
+def check_not_continuing_paths(db, first, second):
+
+    left1, _ = utills.images.get_image(first)
+    left2, _ = utills.images.get_image(second)
+    frame1 = db.get_frames()[first]
+    frame2 = db.get_frames()[second]
+
+    # Get all Features in frame 1 that theirs track ends in frame1
+    frame1_tracks = db.get_tracks_at_frame(frame1.get_id())
+    not_continuing_tracks_features_frame1 = []
+    for track in frame1_tracks:
+        if frame2.get_id() not in track.get_frames_features_dict():
+            not_continuing_tracks_features_frame1.append(track.get_feature_at_frame(frame1.get_id()))
+
+    # Get all features in frame 2
+    frame1_features, frame2_features = db.get_prev_and_next_frame_features()[1]  # [frame1_features, frame2_features]
+
+    # Get features d2_points
+    left1_coor = utills.get_features_left_coor(not_continuing_tracks_features_frame1)
+    left2_coor = utills.get_features_left_coor(frame2_features)
+
+    # Get feature in region:
+    x_val = [0, utills.IMAGE_WIDTH // 2]
+    y_val = [0, utills.IMAGE_HEIGHT // 2]
+
+    left1_coor_in_val = get_coor_in_range(left1_coor, x_val, y_val)
+    left2_coor_in_val = get_coor_in_range(left2_coor, x_val, y_val)
+
+    # left1_in_val = left1[x_val[0]: x_val[1], y_val[0]: y_val[1]]
+    # left2_in_val = left2[x_val[0]: x_val[1], y_val[0]: y_val[1]]
+
+    plot_frame1_ending_tracks_features_and_frame2_features(left1, left2, left1_coor_in_val, left2_coor_in_val)
+
+
+def plot_frame1_ending_tracks_features_and_frame2_features(left1, left2, frame1_features_coor, frame2_features_coor):
+    """
+    Plot images supporters on left0 and left1
+    """
+    rows, cols = 2, 1
+    fig, axes = plt.subplots(rows, cols)
+    fig.suptitle(f'')
+
+    # Left2 camera
+    axes[0].set_title("Left2 camera")
+    axes[0].imshow(left1, cmap='gray')
+    axes[0].scatter(frame1_features_coor[:, 0], frame1_features_coor[:, 1], s=1, color='red')
+
+    # Left1 camera
+    axes[1].set_title("Left1 camera")
+    axes[1].imshow(left2, cmap='gray')
+    axes[1].scatter(frame2_features_coor[:, 0], frame2_features_coor[:, 1], s=1, color='red')
+
+    fig.savefig("VAN_ex/Left1 Left2 ending tracks checking.png")
+    plt.close(fig)
+
+    
+def get_coor_in_range(d2_points, x_val, y_val):
+    """
+    Get Points that their values are in range x_val and y_val where x_val, y_val are tuples.
+    :return:
+    """
+    new_coor = []
+    for coor in d2_points:
+        if x_val[0] <= coor[0] <= x_val[1] and y_val[0] <= coor[1] <= y_val[1]:
+            new_coor.append(coor)
+
+    return np.array(new_coor)
+
+
+def run_missions(missions, load, path):
+    if load:
+        db = DB.load(path)
+    else:
+        start = time.time()
+        prev_and_next_frame_features, inliers_percentage = find_features_in_consecutive_frames_whole_movie()
+        end = time.time()
+        print("Time: ", (end - start) / 60)
+        db = DB.DataBase(prev_and_next_frame_features, inliers_percentage)
+        DB.save(path, db)
+
+    for mission in missions:
+        if mission == 2:
+            mission2(db)
+        if mission == 3:
+            mission3(db, 10)
+        if mission == 4:
+            mission4(db)
+        if mission == 5:
+            mission5(db)
+        if mission == 6:
+            mission6(db)
+        if mission == 7:
+            mission7(db, -1, 10)
+            mission7(db, 0, 10)
